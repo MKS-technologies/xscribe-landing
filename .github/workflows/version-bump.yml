@@ -1,0 +1,157 @@
+name: Version Bump Check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    name: Check Version Bump
+
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Get current version
+        id: current-version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Get base branch version
+        id: base-version
+        run: |
+          BASE_BRANCH="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
+          echo "Base branch: $BASE_BRANCH"
+
+          # Fetch the base branch so we have origin/$BASE_BRANCH
+          git fetch origin $BASE_BRANCH
+
+          # Read version from package.json in the base branch without switching
+          if git cat-file -e origin/$BASE_BRANCH:package.json 2>/dev/null; then
+            BASE_VERSION=$(git show origin/$BASE_BRANCH:package.json | jq -r .version)
+          else
+            BASE_VERSION="0.0.0"
+          fi
+
+          echo "version=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "Base version: $BASE_VERSION"
+
+      - name: Check if files changed
+        id: changes
+        run: |
+          BASE_BRANCH="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
+
+          # Check if there are any changes (excluding .github folder and some configs)
+          CHANGED_FILES=$(git diff --name-only origin/$BASE_BRANCH..HEAD -- . ':!.github' ':!.gitignore')
+
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+            echo "Files changed:"
+            echo "$CHANGED_FILES"
+          else
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "No relevant files changed"
+          fi
+
+      - name: Compare versions
+        id: version-check
+        run: |
+          CURRENT="${{ steps.current-version.outputs.version }}"
+          BASE="${{ steps.base-version.outputs.version }}"
+          HAS_CHANGES="${{ steps.changes.outputs.has-changes }}"
+
+          echo "Current version: $CURRENT"
+          echo "Base version: $BASE"
+          echo "Has changes: $HAS_CHANGES"
+
+          version_compare() {
+            if [[ $1 == $2 ]]; then
+              return 1  # Equal
+            fi
+            
+            local IFS=.
+            local i ver1=($1) ver2=($2)
+            
+            for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)); do
+              ver1[i]=0
+            done
+            
+            for ((i=0; i<${#ver1[@]}; i++)); do
+              if [[ -z ${ver2[i]} ]]; then
+                ver2[i]=0
+              fi
+              if ((10#${ver1[i]} > 10#${ver2[i]})); then
+                return 0  # Greater
+              fi
+              if ((10#${ver1[i]} < 10#${ver2[i]})); then
+                return 2  # Less
+              fi
+            done
+            return 1  # Equal
+          }
+
+          if [ "$HAS_CHANGES" = "true" ]; then
+            version_compare "$CURRENT" "$BASE"
+            RESULT=$?
+            
+            if [ $RESULT -eq 0 ]; then
+              echo "✅ Version has been bumped from $BASE to $CURRENT"
+              echo "version-bumped=true" >> $GITHUB_OUTPUT
+            elif [ $RESULT -eq 1 ]; then
+              echo "❌ Version has not been changed (still $CURRENT)"
+              echo "version-bumped=false" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Version has been decreased from $BASE to $CURRENT"
+              echo "version-bumped=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "ℹ️ No relevant changes detected, version check skipped"
+            echo "version-bumped=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail if version not bumped
+        if: steps.changes.outputs.has-changes == 'true' && steps.version-check.outputs.version-bumped == 'false'
+        run: |
+          echo "::error::Files have been modified but the version in package.json has not been bumped!"
+          echo "::error::Current version: ${{ steps.current-version.outputs.version }}"
+          echo "::error::Base version: ${{ steps.base-version.outputs.version }}"
+          echo ""
+          echo "Please update the version in package.json using semantic versioning:"
+          echo "- Patch version (x.x.X) for bug fixes"
+          echo "- Minor version (x.X.x) for new features"
+          echo "- Major version (X.x.x) for breaking changes"
+          echo ""
+          echo "You can bump the version using:"
+          echo "npm version patch|minor|major"
+          exit 1
+
+      - name: Success message
+        if: steps.version-check.outputs.version-bumped == 'true'
+        run: |
+          if [ "${{ steps.changes.outputs.has-changes }}" = "true" ]; then
+            echo "✅ Version successfully bumped from ${{ steps.base-version.outputs.version }} to ${{ steps.current-version.outputs.version }}"
+          else
+            echo "ℹ️ No relevant changes detected, version check passed"
+          fi
