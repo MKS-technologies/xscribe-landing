@@ -1,0 +1,9 @@
+/* Minimal reset - main styles in App.vue */
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+#app {
+  width: 100%;
+}
